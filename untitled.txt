@@ -1,0 +1,1002 @@
+#============================================================================================#
+#
+#  000. Setting
+#
+#============================================================================================#
+
+# bigquery library - bigrquery
+library(bigrquery)
+# bigquery 인증 - 필수
+bq_auth(path=Sys.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+
+# bigquery dataset 조회 함수
+# project 이름은 'sktaic-datahub' 입니다
+bq_project_datasets("sktaic-datahub", page=1000)
+
+# DBI를 통해 사용하는 경우
+library(DBI)
+
+# project, billing에 AIDP project 이름인 'sktaic-datahub'를 반드시 넘겨줘야 합니다.
+# connect를 맺기 위해서 반드시 dataset의 이름이 필요하므로
+# bigquery console 등에서 미리 사용할 dataset의 이름을 확인해 주세요.
+conn <- dbConnect(
+  bigrquery::bigquery(),
+  project = "sktaic-datahub",
+  dataset = "x1112055",
+  billing = "sktaic-datahub"
+)
+
+# table 목록 조회
+dbListTables(conn)
+
+# query 실행
+dbGetQuery(conn, "select * from x1112525.test_table1", n = 10)
+
+
+
+
+library(magrittr)
+library(data.table)
+
+
+
+
+#################################
+# 도달률 구하기
+#################################
+
+
+#################################
+# 다른 사람의 custom noti
+#################################
+
+
+
+#################################
+# 개인 통합 로그 확인 (w/ 준섭님 통합로그)
+#################################
+
+"APL00000BNP3GOJF24U8"
+
+dbSendQuery(conn, "
+            create or replace table x1112055.adot_customnoti_target as
+            select
+            tb1.*,
+            ROW_NUMBER() OVER(order by tb1.customnoti_cnt desc) as rank
+            from(
+            select user_id, 
+            sum(if(page_cd like '%customnoti%', 1, 0)) as customnoti_cnt,
+            sum(if(informal_token like '%+%', 1, 0)) as proactive_cnt
+            from x1112055.adot_integ_log_202206_testtest
+            group by user_id
+            )tb1")
+
+adot_summ = as.data.table(dbGetQuery(conn, "Select * from x1112055.adot_customnoti_target"))
+adot_summ = adot_summ[order(-customnoti_cnt)]
+
+adot_dat = as.data.table(
+  dbGetQuery(conn, "
+  select
+    tbl1.*
+    from(
+  select
+        tb1.*
+       from
+           x1112055.adot_integ_log_202206_testtest tb1
+       inner join(
+       select * from x1112055.adot_customnoti_target where rank <= 100
+       ) tb2
+       on tb1.user_id = tb2.user_id
+  )tbl1
+"  )) %>% .[order(base_timestamp)]
+
+###############################################################
+
+user_list = unique(adot_dat$user_id)
+
+(user_sample = sample(user_list, 1))
+adot_summ[user_id == user_sample]
+
+adot_dat_sample = adot_dat[user_id == user_sample]
+tmp1 = grep('\\+', adot_dat_sample$informal_token)
+tmp11 = sort(c(tmp1, tmp1+1, tmp1-1, tmp1-2, tmp1+2))
+
+tmp2 = grep('customnoti', adot_dat_sample$page_cd)
+tmp22 = sort(c(tmp2, tmp2+1, tmp2-1, tmp2-2, tmp2+2))
+
+
+# tmp3 = grep('customnoti', adot_dat_sample$page_cd)
+# tmp33 = tmp2
+
+
+adot_dat_sample[c(tmp11, tmp22)] %>% View()
+
+###############################################################
+
+# custom_noti 근처
+k = 0
+bf_af_1 = NULL
+bf_af_2 = NULL
+for(user in unique(adot_dat$user_id)){
+  print(k)
+  dat_tmp = adot_dat[user_id == user]
+  
+  customnoti_num = grep('customnoti', dat_tmp$page_cd)
+  
+  bf_af_1_tmp = sort(c(customnoti_num-1, customnoti_num+1))
+  bf_af_2_tmp = sort(c(customnoti_num-1, customnoti_num+1, customnoti_num-2, customnoti_num+2))
+  
+  bf_af_1 = rbind(bf_af_1, dat_tmp[bf_af_1_tmp])
+  bf_af_2 = rbind(bf_af_2, dat_tmp[bf_af_2_tmp])
+  
+  k = k+1
+}
+
+dim(bf_af_1)
+dim(bf_af_2)
+
+bf_af_1[, .N, by = list(key = paste0(source, '>', page_cd, '>', click_cd))] %>% .[order(-N)] %>% head(20) %>% View()
+bf_af_2[, .N, by = list(key = paste0(source, '>', page_cd, '>', click_cd))] %>% .[order(-N)] %>% head(20)%>% View()
+
+###############################################################
+
+# 세션화 크크크크크크
+
+dbSendQuery(conn, 
+           sprintf(
+             "create or replace table x1112055.adot_integ_log_jh_base as
+             select
+           *
+           ,row_number() over(partition by user_id order by base_timestamp) as rn
+       from
+           --x1112382.adot_integ_log_202206_test
+           x1112055.adot_integ_log_202206_testtest
+       where
+           base_timestamp is not null
+       order by base_timestamp"))
+
+
+# BAP 추가 -> 1차 적재 -> bap informal token 추가 -> page_cd 추가(noticenter 찾으려고)
+
+dbSendQuery(conn, "
+create or replace table x1112055.adot_integ_log_jh_step1 as 
+select
+  tb4.*
+  , dense_rank() over ( partition by user_id order by session_cumsum) as session_id
+from(
+  select
+    tb3.*
+    , TIMESTAMP_DIFF(
+        max(time1) over (partition by concat(user_id, '_', substr(base_timestamp, 1, 10), '_', session_cumsum))
+        ,min(time1) over (partition by concat(user_id, '_', substr(base_timestamp, 1, 10), '_', session_cumsum))
+        , MINUTE) as session_duration 
+  from(
+    select
+      tb2.*
+      ,sum(tb2.session_num) over (partition by user_id order by base_timestamp rows between unbounded preceding and current row) as session_cumsum 
+    from(
+      select
+        tb1.*
+        , TIMESTAMP_DIFF(tb1.time1, tb1.time0, MINUTE) as time_diff
+        , if(TIMESTAMP_DIFF(tb1.time1, tb1.time0, MINUTE) >= 3, 1, 0) as session_num 
+      from(
+        select   
+          user_id
+          , source
+          , base_timestamp
+          , informal_token
+          , page_cd
+          , TIMESTAMP(base_timestamp) as time1
+          ,lag(TIMESTAMP(base_timestamp), 1, NULL) over(partition by user_id order by base_timestamp) as time0
+        from 
+          x1112055.adot_integ_log_jh_base
+        where
+          source not in ('action_publisher_log')
+      ) tb1  
+    )tb2
+  ) tb3
+) tb4
+
+union all
+
+select
+  user_id
+  , source
+  , base_timestamp
+  , informal_token
+  , NULL as page_cd
+  , NULL as time1 
+  , NULL as time0 
+  , NULL as time_diff 
+  , NULL as session_num 
+  , NULL as session_cumsum 
+  , NULL as session_duration 
+  , NULL as session_id 
+from(
+  select
+    *
+    , row_number() over (partition by user_id, informal_token order by base_timestamp asc) as rn1
+  from
+    x1112055.adot_integ_log_jh_base
+  where 
+    source in ('action_publisher_log')
+) tb1_bap
+where
+  tb1_bap.rn1 = 1
+                    ")
+
+ 
+# 처음 : af log = aog + amg --> noticenter -> 시간차이 계산 -> 최종 계산 (실패 케이스)
+
+dbSendQuery(conn, "
+create or replace table x1112055.adot_integ_log_jh_step2 as
+select
+  tbl2.*
+  , case when tbl2.time_diff_click <= 1440 then '1_click'
+  when tbl2.bf_session = tbl2.af_session then '2_rltm'
+  when tbl2.time_diff_noticenter <=  120 then '3_noticenter_2h'
+  when tbl2.time_diff_noticenter <=  1440 then '4_noticenter_1d'
+  when tbl2.time_diff_click >  1440 then '5_click_exp'
+  when tbl2.time_diff_noticenter >  1440 then '6_noticenter_exp'
+  else '9_etc' end as impression_type
+from(
+  select
+    tbl1.*
+    , TIMESTAMP_DIFF(TIMESTAMP(tbl1.base_timestamp_click), TIMESTAMP(tbl1.base_timestamp), MINUTE) as time_diff_click
+    , TIMESTAMP_DIFF(TIMESTAMP(tbl1.af_base_timestamp), TIMESTAMP(tbl1.base_timestamp), MINUTE) as time_diff_noticenter
+  from(
+    select
+      tb1.*
+      ,max(session_id) over (partition by tb1.user_id order by base_timestamp rows between unbounded preceding and current row) as bf_session 
+      ,min(session_id) over (partition by tb1.user_id order by base_timestamp rows between current row and UNBOUNDED FOLLOWING) as af_session 
+      
+      ,min(if(page_cd like '%noticenter%', base_timestamp, NULL)) over (partition by tb1.user_id order by base_timestamp rows between current row and UNBOUNDED FOLLOWING) as af_base_timestamp 
+      
+      , tb2.react_token1
+      , tb2.react_token2
+      , tb2.base_timestamp_click
+    
+    
+    from 
+      x1112055.adot_integ_log_jh_step1 tb1
+    left join(
+      select 
+          STRING(TIMESTAMP(JSON_VALUE(log, '$.api_event_in.logTimestamp'), 'Asia/Seoul'), 'Asia/Seoul')  AS base_timestamp_click,
+          json_value(log, '$.api_event_in.client.userId') as user_id,
+          json_value(log, '$.api_event_in.context.supportedInterfaces.Apollo.token') as react_token1,
+          json_value(log, '$.api_event_in.event.payload.postback.data.token') as react_token2
+      from
+        apollo_log.adot_amg_log_prd
+    ) tb2
+    on 
+      tb1.user_id = tb2.user_id
+      and (tb1.informal_token = tb2.react_token1 or tb1.informal_token = tb2.react_token2)
+  ) tbl1
+) tbl2
+  
+")
+  
+
+
+
+
+
+dbSendQuery(conn, "
+create or replace table x1112055.adot_integ_log_jh_step2 as
+
+  select
+    tbl1.*
+    , TIMESTAMP_DIFF(TIMESTAMP(tbl1.af_base_timestamp), TIMESTAMP(tbl1.base_timestamp), MINUTE) as time_diff_noticenter
+  from(
+    select
+      tb1.*
+      ,max(session_id) over (partition by tb1.user_id order by base_timestamp rows between unbounded preceding and current row) as bf_session 
+      ,min(session_id) over (partition by tb1.user_id order by base_timestamp rows between current row and UNBOUNDED FOLLOWING) as af_session 
+      
+      ,min(if(page_cd like '%noticenter%', base_timestamp, NULL)) over (partition by tb1.user_id order by base_timestamp rows between current row and UNBOUNDED FOLLOWING) as af_base_timestamp 
+      
+    
+    from 
+      x1112055.adot_integ_log_jh_step1 tb1
+  ) tbl1
+")
+
+
+dbSendQuery(conn, "
+create or replace table x1112055.adot_integ_log_jh_step3 as
+
+select
+ tb1.*
+  , tb2.react_token1
+  , tb2.react_token2
+  , tb2.base_timestamp_click
+  , TIMESTAMP_DIFF(TIMESTAMP(tb2.base_timestamp_click), TIMESTAMP(tb1.base_timestamp), MINUTE) as time_diff_click
+
+from(
+  select * from x1112055.adot_integ_log_jh_step2 where source like '%action%'
+)tb1
+left join(
+select 
+  *
+from(
+  select
+    tb2_tmp.*
+    ,row_number() over(partition by user_id, react_token1, react_token2 order by base_timestamp_click asc) as rn
+  from(
+    select 
+      STRING(TIMESTAMP(JSON_VALUE(log, '$.api_event_in.logTimestamp'), 'Asia/Seoul'), 'Asia/Seoul')  AS base_timestamp_click,
+      json_value(log, '$.api_event_in.client.userId') as user_id,
+      json_value(log, '$.api_event_in.context.supportedInterfaces.Apollo.token') as react_token1,
+      json_value(log, '$.api_event_in.event.payload.postback.data.token') as react_token2
+    from
+      apollo_log.adot_amg_log_prd
+    )tb2_tmp
+  ) tb2_tmp2
+  where 
+    tb2_tmp2.rn = 1
+) tb2
+on 
+  tb1.user_id = tb2.user_id
+  and (tb1.informal_token = tb2.react_token1 or tb1.informal_token = tb2.react_token2)
+            ")
+
+
+
+#
+#
+#
+#
+
+tmptmptmp = as.data.table(dbGetQuery(conn, "Select * from  x1112055.adot_integ_log_jh_step3 limit 10
+"))
+  
+  
+View(tmptmptmp)
+
+#
+#
+#
+
+# 기존 최종
+dbSendQuery(conn, "
+create or replace table x1112055.adot_integ_log_jh_final as
+select
+  *
+  , case when time_diff_click <= 1440 and substr(base_timestamp, 1, 10) = substr(base_timestamp_click, 1, 10) then '1_click'
+  when time_diff_click <= 1440 then '2_click_1d'
+  when bf_session = af_session then '3_rltm'
+  when time_diff_noticenter <=  120 then '4_noticenter_2h'
+  when time_diff_noticenter <=  1440 then '5_noticenter_1d'
+  when time_diff_click >  1440 then '6_click_exp'
+  when time_diff_noticenter >  1440 then '7_noticenter_exp'
+  else '9_etc' end as impression_type
+from(
+  select
+    tb2.*
+    , row_number() over(partition by user_id, react_token order by base_timestamp_click asc) as rn2
+  from(
+    select
+        *
+      from(
+        select
+          *
+          , case when regexp_extract(informal_token, r'(^[a-zA-Z_]+)[0-9_]+') in ('apolloMusic_pro_', 'apollo_survey_') then react_token1
+          when regexp_extract(informal_token, r'(^[a-zA-Z_]+)[0-9_]+') in ('apolloVideo_pro_', 'tworld_data') then react_token2
+          else concat(user_id, '_', base_timestamp) end as react_token
+        from
+          x1112055.adot_integ_log_jh_step3
+    )tb1
+  ) tb2
+) tb3
+  where
+    (tb3.base_timestamp_click is null or tb3.rn2 = 1)
+  
+")
+
+
+
+#
+
+# 기존 최종 -> 태균님 쿼리보고 payload null 아닌것 ( 즉, music, survey일때, react1 token을 보지만 2도 null은 아니어야함, 즉, 2는 항상 null아님)
+dbSendQuery(conn, "
+create or replace table x1112055.adot_integ_log_jh_final as
+select
+  *
+  , case when react_token2 is null then '9_etc'
+  when time_diff_click <= 1440 and substr(base_timestamp, 1, 10) = substr(base_timestamp_click, 1, 10) then '1_click'
+  when time_diff_click <= 1440 then '2_click_1d'
+  when bf_session = af_session then '3_rltm'
+  when time_diff_noticenter <=  120 then '4_noticenter_2h'
+  when time_diff_noticenter <=  1440 then '5_noticenter_1d'
+  when time_diff_click >  1440 then '6_click_exp'
+  when time_diff_noticenter >  1440 then '7_noticenter_exp'
+  else '9_etc' end as impression_type
+from(
+  select
+    tb2.*
+    , row_number() over(partition by user_id, react_token order by base_timestamp_click asc) as rn2
+  from(
+    select
+        *
+      from(
+        select
+          *
+          , case when regexp_extract(informal_token, r'(^[a-zA-Z_]+)[0-9_]+') in ('apolloMusic_pro_', 'apollo_survey_') then react_token1
+          when regexp_extract(informal_token, r'(^[a-zA-Z_]+)[0-9_]+') in ('apolloVideo_pro_', 'tworld_data') then react_token2
+          else concat(user_id, '_', base_timestamp) end as react_token
+        from
+          x1112055.adot_integ_log_jh_step3
+    )tb1
+
+  ) tb2
+) tb3
+  where
+    (tb3.base_timestamp_click is null or tb3.rn2 = 1)
+  
+")
+
+
+#========================================================================================================================#
+#
+#     정리 시작
+#
+#========================================================================================================================#
+
+##### META + TELEGRAM
+
+metameta = data.table(
+  recipe = c('apolloVideo_pro_','apolloMusic_pro_','apollo_survey_','tworld_data'),
+  type = c('apollo.builtin.video',
+        'apollo.builtin.music',
+        'apollo.builtin.survey',
+        'apollo.builtin.tworld')
+)
+
+head(metameta)
+
+telegram_dat = fread('../A./000_data/telegram_metirc_tmp.csv', encoding = 'Latin-1')
+telegram_dat[, type := gsub("(.*)\\(.*", "\\1", type)]
+telegram_dat[, dt := paste0(substr(dt, 1, 4), '-', substr(dt, 5, 6), '-', substr(dt, 7,8))]
+
+names(telegram_dat)[3:4] = c('tele_total_cnt', 'tele_click_cnt')
+head(telegram_dat)
+
+
+#####
+
+result_1 =  as.data.table(dbGetQuery(conn, "select 
+           substr(base_timestamp, 1, 10) as dt
+           , regexp_extract(informal_token, r'(^[a-zA-Z_]+)[0-9_]+') as recipe
+           , count(1) as jh_total_cnt
+           , sum(if(substr(impression_type, 1, 1) <= '4', 1, 0)) as jh_impression_cnt
+           , sum(if(substr(impression_type, 1, 1) = '1', 1, 0)) as jh_click_cnt_tele
+           , sum(if(substr(impression_type, 1, 1) <= '2', 1, 0)) as jh_click_cnt_adj
+
+           from x1112055.adot_integ_log_jh_final
+           where informal_token like '%+%'
+           group by substr(base_timestamp, 1, 10)
+           , regexp_extract(informal_token, r'(^[a-zA-Z_]+)[0-9_]+')
+           "))
+
+result_11 = merge(result_1, metameta, by = c('recipe')) %>% .[, -1]
+
+result_11 = merge(result_11, telegram_dat, by = c('dt', 'type'))
+
+
+tmptmptmp %>% .[order(dt)] %>% .[dt >= '2022-06-14'] %>% View()
+
+
+tmp1 = as.data.table(dbGetQuery(conn, 
+                                "select *  
+                                , substr(base_timestamp, 1, 10) as dt
+                                , regexp_extract(informal_token, r'(^[a-zA-Z_]+)[0-9_]+') as recipe
+                                from x1112055.adot_integ_log_jh_final
+           where 
+           substr(base_timestamp, 1, 10)  >= '2022-06-14'
+           --and regexp_extract(informal_token, r'(^[a-zA-Z_]+)[0-9_]+') like '%Music%'"))
+
+
+tmp1[, .N, by = list(dt, recipe, impression_type)]
+
+result1_all = tmp1[, .N, by = list(dt, recipe)]
+result1_all = merge(result1_all, metameta, by = 'recipe')
+
+result1_all
+
+result1_merge = merge(result1_all, telegram_dat, by = c('dt', 'type'))
+
+
+tmp1[!is.na(base_timestamp_click) & !is.na(base_timestamp)] %>% 
+  .[substr(base_timestamp, 1, 10 ) == substr(base_timestamp_click, 1, 10)] %>% .[, .N, by = list(substr(base_timestamp, 1, 10), recipe)]
+
+tmp1[!is.na(base_timestamp_click) & !is.na(base_timestamp)] %>% 
+  .[, .N, by = list(substr(base_timestamp, 1, 10), recipe)]
+
+
+
+
+tmp1[grep('Music', recipe) ] %>% .[substr(impression_type, 1, 1) <= 2]
+tmp1[grep('Music', recipe) ] %>% .[substr(base_timestamp, 1, 10 ) == substr(base_timestamp_click, 1, 10)] %>% .[substr(impression_type, 1, 1) <= 2]
+
+tmp1[grep('Music', recipe) ] %>% 
+  .[substr(base_timestamp, 1, 10 ) == substr(base_timestamp_click, 1, 10)] %>% 
+  .[substr(impression_type, 1, 1) <= 2] %>%
+  View()
+
+
+# 중복 없는디..
+tmp1[grep('Music', recipe) ] %>% 
+  .[substr(base_timestamp, 1, 10 ) == substr(base_timestamp_click, 1, 10)] %>% 
+  .[substr(impression_type, 1, 1) <= 2] %>% .[, .N, by = informal_token] %>% .[order(-N)]
+
+
+tmp1[grep('Music', recipe) ] %>% 
+  .[substr(base_timestamp, 1, 10 ) == substr(base_timestamp_click, 1, 10)] %>% 
+  .[substr(impression_type, 1, 1) <= 2, list(base_timestamp, base_timestamp_click)]
+
+
+
+tmp1[!is.na(time_diff_click), list(tot_cnt = .N, 
+            token1_na = sum(is.na(react_token1)),
+            token2_na = sum(is.na(react_token2))), by = recipe]
+
+tmp1[grep('1_', impression_type)] %>% View()
+
+
+
+### DT CHECK
+
+#### BAP 똑같!!!
+dbGetQuery(conn, "
+select
+STRING(TIMESTAMP(datetime), 'Asia/Seoul') AS base_timestamp
+, datetime(cast(datetime as timestamp), 'Asia/Seoul') as datetime
+, substr(STRING(TIMESTAMP(datetime), 'Asia/Seoul'), 1, 10) as base_timestamp_dt
+, extract(date from datetime(cast(datetime as timestamp), 'Asia/Seoul')) as datetime_dt
+FROM `sktaic-datahub.bap_logs_prd.lunar_recipe_action_publisher` limit 3")
+
+#### AMG !!!
+
+
+dbGetQuery(conn, "
+select
+STRING(TIMESTAMP(JSON_VALUE(log, '$.api_event_in.logTimestamp'), 'Asia/Seoul'), 'Asia/Seoul') AS base_timestamp,
+datetime(timestamp, 'Asia/Seoul') as datetime,
+substr(STRING(TIMESTAMP(JSON_VALUE(log, '$.api_event_in.logTimestamp'), 'Asia/Seoul'), 'Asia/Seoul'), 1, 10) as base_timestamp_dt, 
+extract(date from datetime(timestamp, 'Asia/Seoul')) as datetime_dt
+FROM `sktaic-datahub.apollo_log.adot_amg_log_prd`
+           ") %>% as.data.table
+
+
+dbGetQuery(conn, "
+select
+count(1)
+  ,sum(if(base_timestamp_dt = cast(datetime_dt as string), 1, 0))
+  ,sum(if(base_timestamp_dt = cast(datetime_dt as string), 0, 1))
+from(
+select
+STRING(TIMESTAMP(JSON_VALUE(log, '$.api_event_in.logTimestamp'), 'Asia/Seoul'), 'Asia/Seoul') AS base_timestamp,
+datetime(timestamp, 'Asia/Seoul') as datetime,
+substr(STRING(TIMESTAMP(JSON_VALUE(log, '$.api_event_in.logTimestamp'), 'Asia/Seoul'), 'Asia/Seoul'), 1, 10) as base_timestamp_dt, 
+extract(date from datetime(timestamp, 'Asia/Seoul')) as datetime_dt
+FROM `sktaic-datahub.apollo_log.adot_amg_log_prd`
+)
+           ") %>% as.data.table
+
+####
+
+
+####
+
+###
+tmp1 = as.data.table(dbGetQuery(conn, 
+                                "select *  
+                                , regexp_extract(informal_token, r'(^[a-zA-Z_]+)[0-9_]+') as recipe
+                                from x1112055.adot_integ_log_jh_final
+           where 
+           substr(base_timestamp, 1, 10)  = '2022-06-16'
+           --and regexp_extract(informal_token, r'(^[a-zA-Z_]+)[0-9_]+') like '%Music%'"))
+
+
+#
+#
+#
+#
+## 신이님 체크
+
+#x1112055.adot_integ_log_202206_testtest
+
+ss = dbGetQuery(conn, "select source, push_service_type, count(1) as cnt from x1112382.adot_integ_log_202206_test
+           group by source, push_service_type")
+
+ss2 = dbGetQuery(conn, "select push_service_type, count(1) as cnt
+                 from x1112382.adot_integ_log_202206_test
+                 where source like '%action%'
+                 and informal_token like '%+%'
+                 group by push_service_type")
+
+#
+#
+#
+
+# 준혁 : "APL00000BNP3GOJF24U8"
+# 수미 : "APL00000BJT0XN4K0LC0"
+# 미라 : "APL00000BJAN9OUR5V5S"
+# 은정 : "APL00000BJ3TJ4GSSDMO"
+
+r1 = tmptmptmp[user_id == "APL00000BNP3GOJF24U8"] %>% .[grep("action", source), table(impression_type)] %>% as.data.table()
+r1[, R:= round(prop.table(N), 3)]
+r1[order(-N)] %>% View()
+
+r2 = tmptmptmp[user_id == "APL00000BJT0XN4K0LC0"] %>% .[grep("action", source), table(impression_type)] %>% as.data.table()
+r2[, R:= round(prop.table(N), 3)]
+r2[order(-N)] %>% View()
+
+
+r3 = tmptmptmp[user_id == "APL00000BJAN9OUR5V5S"] %>% .[grep("action", source), table(impression_type)] %>% as.data.table()
+r3[, R:= round(prop.table(N), 3)]
+r3[order(-N)] %>% View()
+
+r4 = tmptmptmp[user_id == "APL00000BJ3TJ4GSSDMO"] %>% .[grep("action", source), table(impression_type)] %>% as.data.table()
+r4[, R:= round(prop.table(N), 3)]
+r4[order(-N)] %>% View()
+
+## meta
+
+meta = as.data.table(dbGetQuery(conn, "Select * from x1112055.adot_mst_202206"))
+
+meta[phonenumber %in% c("01029522802", "01063725837"), id] %>% unique()
+#
+
+#
+#
+#
+#
+#
+
+####
+
+tmptmp = dbGetQuery(conn, "
+select
+  tb4.*
+  , dense_rank() over ( partition by user_id order by session_cumsum) as session_id
+from(
+  select
+    tb3.*
+    , TIMESTAMP_DIFF(
+        max(time1) over (partition by concat(user_id, '_', substr(base_timestamp, 1, 10), '_', session_cumsum))
+        ,min(time1) over (partition by concat(user_id, '_', substr(base_timestamp, 1, 10), '_', session_cumsum))
+        , MINUTE) as session_duration 
+  from(
+    select
+      tb2.*
+      ,sum(tb2.session_num) over (partition by user_id order by base_timestamp rows between unbounded preceding and current row) as session_cumsum 
+    from(
+      select
+        tb1.*
+        , TIMESTAMP_DIFF(tb1.time1, tb1.time0, MINUTE) as time_diff
+        , if(TIMESTAMP_DIFF(tb1.time1, tb1.time0, MINUTE) >= 3, 1, 0) as session_num 
+      from(
+        select   
+          user_id
+          , source
+          , base_timestamp
+          , TIMESTAMP(base_timestamp) as time1
+          ,lag(TIMESTAMP(base_timestamp), 1, NULL) over(partition by user_id order by base_timestamp) as time0
+        from 
+          x1112055.adot_integ_log_jh_base
+        where
+          source not in ('action_publisher_log')
+      ) tb1  
+    )tb2
+  ) tb3
+) tb4
+
+union all
+
+select
+  user_id
+  ,source
+  ,base_timestamp
+  , NULL as time1 
+  , NULL as time0 
+  , NULL as time_diff 
+  , NULL as session_num 
+  , NULL as session_cumsum 
+  , NULL as session_duration 
+  , NULL as session_id 
+from 
+  x1112055.adot_integ_log_jh_base
+where
+  source in ('action_publisher_log')
+  
+                    ") %>% as.data.table() %>% .[order(user_id, base_timestamp)]
+
+
+
+View(tmptmp)
+
+##
+for(i in names(tmptmp)[4:10]){
+  cat(", NULL as", i, '\n' )
+}
+
+
+names(tmptmp)
+tmptmp[, c(1, 2, 3, 4, 5, 9, 10)] %>% View()
+# 예시 찾기
+tmptmp[, .N, by = list(user_id, session_id)]
+
+tmptmp[, c(1, 2, 3, 4, 5, 9, 10)] %>% .[session_id == 48] %>% View()
+
+
+
+
+#____________________________________________________________________________________________________________
+
+## OK
+dbGetQuery(conn, "select TIMESTAMP_DIFF(cast(base_timestamp as timestamp), 
+cast(base_timestamp as timestamp), MINUTE)   from x1112055.adot_integ_log_jh_base
+            limit 30
+                     ")
+## TEST -> OK
+dbGetQuery(conn, "select TIMESTAMP_DIFF(TIMESTAMP(base_timestamp), 
+TIMESTAMP(base_timestamp), MINUTE)   from x1112055.adot_integ_log_jh_base
+            limit 30
+                     ")
+
+
+dbGetQuery(conn, "select TIMESTAMP(base_timestamp) from x1112055.adot_integ_log_jh_base
+            limit 30
+                     ")
+View(tmptmp)
+# SELECT  
+# date
+# ,SUM(confirmed_cases) as confirmed_cases
+# ,LAG(SUM(confirmed_cases)) OVER (ORDER BY date ASC) as prev_confirmed_cases
+# FROM `bigquery-public-data.covid19_usafacts.summary` 
+# GROUP BY date
+# ORDER BY date ASC
+
+
+
+
+###############################################################
+table(substr(adot_dat$base_timestamp, 1, 10))
+
+adot_dat[, c(3, 4, 5, 6, 7, 9, 11, 12, 18)] %>% View()
+adot_dat %>% View()
+
+#
+
+adot_dat[push_service_type == 'PROACTIVE'] %>% .[, c(3, 4, 5, 6, 7, 9, 10, 12, 13, 19)] %>% View()
+
+
+## custom noti.
+
+adot_dat[grep('customnoti', page_cd)]
+
+## CASE
+
+adot_dat_cse_click_ytg = as.data.table(dbGetQuery(conn, "
+                                                  select 
+                                                  STRING(TIMESTAMP(JSON_VALUE(log, '$.api_event_in.logTimestamp'), 'Asia/Seoul'), 'Asia/Seoul')  AS base_timestamp,
+                                                  json_value(log, '$.api_event_in.client.userId') as user_id,
+                                                  json_value(log, '$.api_event_in.context.supportedInterfaces.Apollo.token') as react_token1,
+                                                  json_value(log, '$.api_event_in.event.payload.postback.data.token') as react_token2,
+                                                  timestamp,
+                                                  datetime(timestamp, 'Asia/Seoul') as datetime,
+                                                  log
+from
+apollo_log.adot_amg_log_prd
+where json_value(log, '$.api_event_in.client.userId') = 'APL00000BNP3GOJF24U8' "))
+
+
+
+##########
+#MERGE
+#########
+
+adot_dat
+adot_dat_cse_click_ytg
+
+adot_dat[ ,react_token := informal_token]
+
+adot_merge = rbind(
+  merge(adot_dat_cse_click_ytg[grep('+', react_token1)], adot_dat[grep('+', informal_token)], by.x = 'react_token1', by.y = 'informal_token'),
+  merge(adot_dat_cse_click_ytg[grep('+', react_token2)], adot_dat[grep('+', informal_token)], by.x = 'react_token2', by.y = 'informal_token', allow.cartesian = T)
+) 
+
+names(adot_merge)
+adot_merge[, c(25, 1, 4, 10, 12, 13, 14, 15, 16, 17, 18, 19, 20)] %>% View()
+#
+#
+#
+#
+#
+
+
+
+adot_dat_cse_click_ytg[, react_token11 := gsub(".*\\+(.*)", "\\1", react_token1)]
+adot_dat_cse_click_ytg[, react_token22 := gsub(".*\\+(.*)", "\\1", react_token2)]
+
+## CASE1 : 반응 빼기
+
+adot_dat_case1_push = adot_dat[!is.na(informal_token)] 
+adot_dat_case1_push = adot_dat[!is.na(template_token)] 
+
+adot_dat_case1_push = adot_dat[grep('action', source)] 
+
+
+adot_dat_case1_push$informal_token
+adot_dat_case1_push$template_token
+
+adot_dat_case1_push[, bap_token := gsub(".*\\+(.*)", "\\1", informal_token)]
+adot_dat_case1_push[, bap_token := gsub(".*\\+(.*)", "\\1", template_token)]
+
+
+adot_dat_case1_click = adot_dat[!is.na(apollo_token)]
+adot_dat_case1_click = adot_dat[grep("amg", source)]
+
+sapply(adot_dat_case1_click, function(x) print(unique(x)))
+adot_dat_case1_click$apollo_token %>% unique()
+
+adot_dat_case1_click[, apollo_token2 := gsub(".*\\+(.*)", "\\1", apollo_token)]
+
+
+
+intersect(adot_dat_case1_push$informal_token, adot_dat_case1_click$apollo_token %>% unique())
+intersect(adot_dat_case1_push$informal_token, adot_dat_case1_click$template_token %>% unique())
+
+intersect(adot_dat_case1_push$template_token, adot_dat_case1_click$apollo_token %>% unique())
+intersect(adot_dat_case1_push$template_token, adot_dat_case1_click$template_token %>% .[!is.na(.)] %>% unique())
+
+
+intersect(adot_dat_case1_push$informal_token, adot_dat_cse_click_ytg$react_token1 %>% unique())
+# intersect(adot_dat_case1_push$template_token, adot_dat_cse_click_ytg$react_token2 %>% unique() %>% .[!is.na(.)])
+
+# intersect(adot_dat_case1_push$template_token, adot_dat_cse_click_ytg$react_token1 %>% unique())
+intersect(adot_dat_case1_push$informal_token, adot_dat_cse_click_ytg$react_token2 %>% unique() %>% .[!is.na(.)])
+
+
+intersect(adot_dat_case1_push$bap_token, adot_dat_cse_click_ytg$react_token1 %>% unique())
+intersect(adot_dat_case1_push$bap_token, adot_dat_cse_click_ytg$react_token2 %>% unique())
+intersect(adot_dat_case1_push$bap_token, adot_dat_cse_click_ytg$react_token11 %>% unique())
+intersect(adot_dat_case1_push$bap_token, adot_dat_cse_click_ytg$react_token22 %>% unique())
+
+
+
+sapply(adot_dat_case1_push, function(x) print(unique(x)))
+# 
+##
+# page / click cutom 
+
+adot_dat = as.data.table(
+  dbGetQuery(conn, 
+             sprintf(
+               "select
+           *
+       from
+           x1112382.adot_integ_log_202206_test
+       where
+           user_id = '%s'"
+               , "APL00000BNP3GOJF24U8")
+  )
+)
+
+#################################
+dat_bap_Check = as.data.table(dbGetQuery(conn, "select dt, count(1) as cnt 
+from bap_logs_prd.lunar_recipe_action_publisher
+                                  where status = 'success' and type = 'action' and messageis not null
+                                  group by dt
+                                         "))
+
+bap_dt = as.data.table(dbGetQuery(conn, "
+
+select 
+datetime(cast(datetime as timestamp), 'Asia/Seoul') as datetime_ytg,
+STRING(TIMESTAMP(datetime), 'Asia/Seoul') AS datetime_yjs,
+TIMESTAMP(datetime) as datetime_timestamp,
+datetime,
+extract(date from datetime(cast(datetime as timestamp), 'Asia/Seoul')) as dt_ytg,
+dt
+from bap_logs_prd.lunar_recipe_action_publisher
+where status = 'success' 
+and type = 'action' 
+and message is not null
+and dt >= '2022-06-11'
+"))
+
+rbind(head(bap_dt[dt == '2022-06-13'] %>% .[order(datetime_yjs)]),
+      tail(bap_dt[dt == '2022-06-13'] %>% .[order(datetime_yjs)])) %>% View()
+
+
+rbind(head(bap_dt[dt_ytg == '2022-06-13'] %>% .[order(datetime_yjs)]),
+      tail(bap_dt[dt_ytg == '2022-06-13'] %>% .[order(datetime_yjs)])) %>% View()
+
+bap_dt[, list(dt, datetime)]
+bap_dt[dt != substr(datetime, 1, 10), list(dt, datetime, dt_ytg)]
+
+
+dt_case1 = as.data.table(dbGetQuery(conn, "
+select 
+dt, 
+count(1) as cnt
+from bap_logs_prd.lunar_recipe_action_publisher
+where status = 'success' 
+and type = 'action' 
+and message is not null
+and dt >= '2022-06-11'
+group by dt
+"))
+
+
+
+
+
+dt_case2 = as.data.table(dbGetQuery(conn, "
+select 
+extract(date from datetime(cast(datetime as timestamp), 'Asia/Seoul')) as dt, 
+count(1) as cnt
+from bap_logs_prd.lunar_recipe_action_publisher
+where status = 'success' 
+and type = 'action' 
+and message is not null
+and dt >= '2022-06-11'
+group by extract(date from datetime(cast(datetime as timestamp), 'Asia/Seoul'))
+"))
+
+
+
+dt_case1
+dt_case2
+dt_case_all = merge(dt_case1, dt_case2, by = 'dt')
+
+
+########
+# BAP
+########
+
+as.data.table(dbGetQuery(conn, "
+select 
+dt,
+regexp_extract(json_valu(message, '$.tonedirectives.informal.token'), r'(^[a-zA-Z0-9_]+)\+') as push_recipe
+from bap_logs_prd.lunar_recipe_action_publisher
+where status = 'success' 
+and type = 'action' 
+and message is not null
+and dt >= '2022-06-11'
+limit 3
+"))
+
+
+as.data.table(dbGetQuery(conn, "
+select 
+dt,
+regexp_extract(json_value(message, '$.tonedirectives.informal.token'), r'(^[a-zA-Z0-9_]+)\+') as push_recipe,
+count(1) as cnt
+from bap_logs_prd.lunar_recipe_action_publisher
+where status = 'success' 
+and type = 'action' 
+and message is not null
+and dt >= '2022-06-11'
+grop by dt,
+regexp_extract(json_value(message, '$.tonedirectives.informal.token'), r'(^[a-zA-Z0-9_]+)\+')
+"))
+
+
+ss = as.data.table(dbGetQuery(conn, "select * from x1112055.adot_bap_dt_tmp"))
+
+ss2 = dcast(ss, dt~push_recipe, value.var = 'cnt')
+ss2$total = apply(ss2[, -1], 1, sum)
+
+View(ss2)
+
+
+
+tt = as.data.table(dbGetQuery(conn, "select * from x1112055.adot_bap_dt_tmp2"))
+
+tt2 = dcast(tt, dt~push_recipe, value.var = 'cnt')
+tt2$total = apply(tt2[, -1], 1, sum)
+
+View(tt2)
