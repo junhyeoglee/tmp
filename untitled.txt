@@ -1,3 +1,21 @@
+
+%%bq
+
+    create or replace table sktaic-datahub.x1112055.adot_bap_dt_tmp2 as 
+    select 
+        extract(date from datetime(cast(datetime as timestamp), 'Asia/Seoul')) as dt,
+        regexp_extract(json_value(message, '$.tonedirectives.informal.token'), r'(^[a-zA-Z_]+)[0-9_]+') as push_recipe,
+        count(1) as cnt
+    from 
+        bap_logs_prd.lunar_recipe_action_publisher
+    where 
+        status = 'success' 
+        and type = 'action' 
+        and message is not null
+        and dt >= '2022-06-11'
+    group by 
+        extract(date from datetime(cast(datetime as timestamp), 'Asia/Seoul')),
+        regexp_extract(json_value(message, '$.tonedirectives.informal.token'), r'(^[a-zA-Z_]+)[0-9_]+')
 #============================================================================================#
 #
 #  000. Setting
