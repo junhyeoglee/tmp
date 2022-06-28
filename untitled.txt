@@ -1,4 +1,28 @@
 
+wewe = as.data.table(dbGetQuery(conn, "
+select
+recipe_name
+, recipe_type
+, description
+, domain
+, start_date
+, end_date
+, enabled
+, condition.condition_name
+, case when condition.condition_name = 'AGE' then array<STRING>[cast(condition.params.min as string), cast(condition.params.max as string)]
+       when condition.condition_name = 'TIME' then array<STRING>[cast(condition.params.start_time as string), cast(condition.params.end_time as string)]
+       else array<STRING>[] end as condition_params
+, action.notification.action.type                  as notification_action_type 
+, action.notification.message_t_text.formal        as notification_message_t_text_formal 
+, action.notification.message_t_text.informal      as notification_message_t_text_informal 
+, action.notification.save                         as notification_save 
+, action.notification.separated                    as notification_separated 
+, action.notification.title_t_text.formal          as notification_title_t_text_formal 
+, action.notification.title_t_text.informal        as notification_title_t_text_informal 
+, action.notification.type                         as notification_type 
+from x1112382.bap_recipe_raw 
+"))
+
 %%bq
 
     create or replace table sktaic-datahub.x1112055.adot_bap_dt_tmp2 as 
