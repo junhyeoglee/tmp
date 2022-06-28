@@ -1,4 +1,158 @@
 
+CREATE OR REPLACE TABLE x1112055.adot_integ_log_202206_testtesttest AS
+WITH applog_nested AS (
+        SELECT timestamp,
+               log,
+               JSON_VALUE(log, '$.BODY.USER_ID') AS user_id,
+               JSON_VALUE(log, '$.HEADER.API') AS api,
+               ARRAY_CONCAT(
+                 JSON_QUERY_ARRAY(log, '$.BODY.STAT.CLICK'),
+                 JSON_QUERY_ARRAY(log, '$.BODY.STAT.PV')) AS stat_array
+          FROM apollo_log.applog_prd
+         WHERE DATE(timestamp) >= '2022-06-01'
+         and log not like '%오전%'
+         and log not like '%오후%'
+
+         
+),
+applog_unnested AS (
+        SELECT timestamp,
+               log,
+               user_id,
+               api,
+               stat
+          FROM applog_nested, UNNEST(stat_array) stat
+),
+app_log AS (
+        SELECT user_id,
+               timestamp,
+               api,
+               TIMESTAMP(JSON_VALUE(stat, '$.START_TM')) AS start_tm,
+               TIMESTAMP(JSON_VALUE(stat, '$.END_TM')) AS end_tm,
+               JSON_VALUE(stat, '$.PAGE_CD') AS page_cd,
+               TIMESTAMP(JSON_VALUE(stat, '$.CLICK_TM')) AS click_tm,
+               JSON_VALUE(stat, '$.CLICK_CD') AS click_cd,
+               JSON_VALUE(stat, '$.CLICK_ACTION_CD') AS click_action_cd,
+               JSON_VALUE(stat, '$.CLIENT_SEQ') AS client_seq,
+               JSON_QUERY_ARRAY(stat, '$.ADDITIONAL_DIMENSION') AS additional_dimension
+          FROM applog_unnested
+
+
+),
+amg_pasing_json AS (
+        SELECT JSON_VALUE(log, '$.biz_out.userId') AS user_id,
+               timestamp,
+               TIMESTAMP(JSON_VALUE(log, '$.api_event_in.logTimestamp'), 'Asia/Seoul') AS log_timestamp,
+               JSON_VALUE(log, '$.api_event_in.context.supportedInterfaces.Apollo.token') AS apollo_token,
+               JSON_VALUE(log, '$.api_event_in.context.supportedInterfaces.Apollo.template.token') AS template_token,
+               JSON_VALUE(log, '$.api_event_in.context.supportedInterfaces.Apollo.template.message.text') AS message,
+               TIMESTAMP(JSON_VALUE(log, '$.parallel_in_0.logTimestamp'), 'Asia/Seoul') AS question_timestamp,
+               JSON_VALUE(log, '$.parallel_in_0.query.query') AS question,
+               TIMESTAMP(JSON_VALUE(log, '$.play_out.logTimestamp'), 'Asia/Seoul') AS answer_timestamp,
+               JSON_VALUE(log, '$.play_out.tts.text') AS answer
+          FROM `sktaic-datahub.apollo_log.adot_amg_log_prd`
+         WHERE DATE(timestamp) >= '2022-06-01'
+),
+structed_logs AS (
+        SELECT user_id,
+               timestamp,
+               [STRUCT('adot_amg_log' AS source, log_timestamp AS log_timestamp, message AS message),
+                STRUCT('adot_amg_log_question' AS source, question_timestamp AS log_timestamp, question AS message),
+                STRUCT('adot_amg_log_answer' AS source, answer_timestamp AS log_timestamp, answer AS message)] AS logs,
+               apollo_token,
+               template_token
+          FROM amg_pasing_json
+),
+amg_log AS (
+        SELECT user_id,
+               timestamp,
+               log.source,
+               log.log_timestamp,
+               log.message,
+               apollo_token,
+               template_token
+          FROM structed_logs, UNNEST(logs) AS log             
+),
+action_publisher_log AS (
+        SELECT apollo_id, 
+               TIMESTAMP(datetime) AS timestamp,
+               recipes,
+               JSON_VALUE(message, '$.pushservicetype') AS push_service_type,
+               JSON_VALUE(message, '$.tonedirectives.informal.token') AS informal_token,
+               JSON_VALUE(message, '$.tonedirectives.polite.token') AS polite_token,
+               JSON_VALUE(message, '$.tonedirectives.informal.ttstrigger.token') AS informal_tts_trigger_token,
+               JSON_VALUE(message, '$.tonedirectives.polite.ttstrigger.token') AS polite_tts_trigger_token,
+               JSON_QUERY_ARRAY(message, '$.tonedirectives.polite.templates') AS polite_templates,
+               JSON_QUERY_ARRAY(message, '$.tonedirectives.informal.templates') AS informal_templates,
+               JSON_VALUE(message, '$.tonedirectives.informal.notification.message') AS informal_message,
+               JSON_VALUE(message, '$.tonedirectives.polite.notification.message') AS polite_message
+          FROM `sktaic-datahub.bap_logs_prd.lunar_recipe_action_publisher`
+         WHERE dt >= '2022-06-01'
+           AND apollo_id IS NOT NULL
+           AND apollo_id != 'none'
+)
+        SELECT user_id,
+               timestamp,
+               'applog' AS source,
+               COALESCE(NULL, STRING(start_tm, 'Asia/Seoul'), STRING(click_tm, 'Asia/Seoul')) AS base_timestamp,
+               page_cd,
+               click_cd,
+               click_action_cd,
+               NULL AS recipes,
+               NULL AS apollo_token,
+               NULL AS template_token,
+               NULL AS message,
+               NULL AS informal_token,
+               NULL AS polite_token,
+               NULL AS informal_tts_trigger_token,
+               NULL AS polite_tts_trigger_token,
+               NULL AS informal_templates,
+               NULL AS polite_templates,
+               additional_dimension
+          FROM app_log
+          
+     UNION ALL
+        SELECT user_id,
+               timestamp,
+               source,
+               STRING(log_timestamp, 'Asia/Seoul') AS base_timestamp,
+               NULL AS page_cd,
+               NULL AS click_cd,
+               NULL AS click_action_cd,
+               NULL AS recipes,
+               apollo_token,
+               template_token,
+               message,
+               NULL AS informal_token,
+               NULL AS polite_token,
+               NULL AS informal_tts_trigger_token,
+               NULL AS polite_tts_trigger_token,
+               NULL AS informal_templates,
+               NULL AS polite_templates,
+               NULL AS additional_dimension
+          FROM amg_log
+     UNION ALL 
+        SELECT apollo_id AS user_id,
+               timestamp,
+               'action_publisher_log' AS source,
+               STRING(timestamp, 'Asia/Seoul') AS base_timestamp,
+               NULL AS page_cd,
+               NULL AS click_cd,
+               NULL AS click_action_cd,
+               recipes,
+               NULL AS apollo_token,
+               NULL AS template_token,
+               CONCAT(informal_message,' ', polite_message) AS message,
+               informal_token,
+               polite_token,
+               informal_tts_trigger_token,
+               polite_tts_trigger_token,
+               informal_templates,
+               polite_templates,
+               NULL AS additional_dimension
+          FROM action_publisher_log
+
+
 wewe = as.data.table(dbGetQuery(conn, "
 select
 recipe_name
